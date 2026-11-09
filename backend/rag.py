@@ -22,6 +22,7 @@ from backend.knowledge_domains import (
     UPLOAD_COLLECTION,
     search_with_domains,
 )
+from backend.ranking_links import current_university_ranking_response
 
 
 # ==========================================================
@@ -2222,6 +2223,10 @@ def ask_randyll(question, domains=None):
             ),
             "sources": []
         }
+
+    ranking_response = current_university_ranking_response(question)
+    if ranking_response is not None:
+        return ranking_response
 
     
     # ------------------------------------------------------
