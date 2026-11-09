@@ -336,8 +336,14 @@ searchable by chat. The app preserves university, topic, degree, and domain
 metadata when those values exist on the matched source. Sources marked
 unapproved or requiring review are not changed; complete their review workflow
 first. If deleting obsolete vectors fails, the app attempts to restore their
-backups and marks new vectors inactive. Scanned PDFs must be OCR-processed
-before uploading. Files are not archived locally, and PostgreSQL is not modified.
+backups and marks new vectors inactive. Pages with images and sparse selectable
+text are automatically OCR-processed with PyMuPDF and Tesseract using English
+and Korean by default. Install Tesseract with the required language data on the
+machine running the app; sparse-text pages containing images or vector graphics
+are OCR-processed. Set `PDF_OCR_LANGUAGES` in `.env` to another installed
+Tesseract language combination if needed. OCR text keeps its PDF page number
+and is indexed with the document in Qdrant. Files are not archived locally, and
+PostgreSQL is not modified.
 
 ## Run the app
 

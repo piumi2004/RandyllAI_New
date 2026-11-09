@@ -39,7 +39,7 @@ uploaded_file = st.file_uploader(
     "Document",
     type=["pdf", "txt", "md"],
     accept_multiple_files=False,
-    help="Upload a text-based document up to 50 MB. Scanned PDFs need OCR first.",
+    help="Upload a document up to 50 MB. Sparse scanned or vector-rendered PDF pages are automatically OCR-processed.",
     max_upload_size=50,
 )
 

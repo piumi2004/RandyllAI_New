@@ -179,24 +179,46 @@ def extract_pages(filename, content):
         with pymupdf.open(stream=content, filetype="pdf") as document:
             if document.needs_pass:
                 raise ValueError("This PDF is password-protected and cannot be indexed.")
-            image_only_pages = []
             pages = []
             for page_number, page in enumerate(document, start=1):
                 text = page.get_text("text").strip()
+                native_text = text
+                extraction_method = "pymupdf_native"
+                if len(text) < 80 and (page.get_images() or page.get_drawings()):
+                    load_dotenv(PROJECT_ROOT / ".env")
+                    languages = os.getenv("PDF_OCR_LANGUAGES", "eng+kor").strip()
+                    if not languages:
+                        raise ValueError("PDF_OCR_LANGUAGES must name at least one installed Tesseract language.")
+                    try:
+                        text_page = page.get_textpage_ocr(
+                            language=languages,
+                            dpi=300,
+                            full=True,
+                        )
+                        ocr_text = page.get_text("text", textpage=text_page, sort=True).strip()
+                    except RuntimeError as error:
+                        raise ValueError(
+                            f"OCR failed on PDF page {page_number}. Install Tesseract OCR "
+                            f"with the {languages} language data, or set PDF_OCR_LANGUAGES "
+                            f"to installed languages in .env. Details: {error}"
+                        ) from error
+                    if ocr_text:
+                        text = ocr_text
+                        extraction_method = "pymupdf_ocr"
+                    else:
+                        text = native_text
                 if text:
-                    pages.append({"page": page_number, "text": text})
-                elif page.get_images():
-                    image_only_pages.append(page_number)
+                    pages.append({
+                        "page": page_number,
+                        "text": text,
+                        "extraction_method": extraction_method,
+                    })
     except pymupdf.FileDataError as error:
         raise ValueError("Unable to read this PDF. Check that the file is valid.") from error
-    if image_only_pages:
-        numbers = ", ".join(str(number) for number in image_only_pages)
-        raise ValueError(
-            f"PDF page(s) {numbers} contain images without selectable text. "
-            "Run OCR on these pages before uploading."
-        )
     if not pages:
-        raise ValueError("No selectable text was found in the PDF. Run OCR before uploading.")
+        raise ValueError(
+            "No readable text was found in the PDF. Check that it contains text or scanned pages."
+        )
     return pages
 
 
@@ -216,7 +238,7 @@ def extract_document_pages(filename, content):
         raise ValueError("Text and Markdown documents must use UTF-8 encoding.") from error
     if not text:
         raise ValueError("The uploaded document contains no text.")
-    return [{"page": 1, "text": text}]
+    return [{"page": 1, "text": text, "extraction_method": "text"}]
 
 
 def _normalize(value):
@@ -623,6 +645,7 @@ def _prepare_chunks(metadata, content, pages):
                 "document_id": document_id,
                 "page": page["page"],
                 "chunk_number": number,
+                "extraction_method": page["extraction_method"],
             })
     if not chunks:
         raise ValueError("No indexable text was extracted from the PDF.")
@@ -934,11 +957,16 @@ def upload_document_to_qdrant(filename, content, client, embedding_model,
                 "document_id": document_id,
                 "page": page["page"],
                 "chunk_number": number,
+                "extraction_method": page["extraction_method"],
             })
     if not chunks:
         raise ValueError("No indexable text was extracted from the document.")
 
     primary_collection = primary_collection or primary_collection_name()
+    ocr_pages = sum(
+        page["extraction_method"] == "pymupdf_ocr"
+        for page in pages
+    )
     source_points_by_collection = {}
     for collection in dict.fromkeys((primary_collection, UPLOAD_COLLECTION)):
         source_points = _collect_source_points(client, collection, clean_filename)
@@ -1027,6 +1055,7 @@ def upload_document_to_qdrant(filename, content, client, embedding_model,
             "unchanged_chunks": len(unchanged),
             "updated_chunks": 0,
             "removed_chunks": 0,
+            "ocr_pages": ocr_pages,
             "already_active": bool(unchanged),
             "matched_source": bool(all_source_points),
         }
@@ -1110,6 +1139,7 @@ def upload_document_to_qdrant(filename, content, client, embedding_model,
         "updated_chunks": len(changed),
         "removed_chunks": sum(deleted_counts.values()),
         "deleted_by_collection": deleted_counts,
+        "ocr_pages": ocr_pages,
         "already_active": False,
         "matched_source": bool(all_source_points),
     }

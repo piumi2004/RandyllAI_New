@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pymupdf
@@ -57,6 +58,28 @@ class UploadDocumentTests(unittest.TestCase):
         for text in page_texts:
             page = document.new_page()
             page.insert_text((72, 72), text)
+        content = document.tobytes()
+        document.close()
+        return content
+
+    def make_scanned_pdf(self):
+        document = pymupdf.open()
+        page = document.new_page()
+        image = pymupdf.Pixmap(
+            pymupdf.csRGB,
+            pymupdf.IRect(0, 0, 100, 100),
+            False,
+        )
+        image.clear_with(255)
+        page.insert_image(page.rect, stream=image.tobytes("png"))
+        content = document.tobytes()
+        document.close()
+        return content
+
+    def make_vector_graphics_pdf(self):
+        document = pymupdf.open()
+        page = document.new_page()
+        page.draw_rect(pymupdf.Rect(72, 72, 500, 700))
         content = document.tobytes()
         document.close()
         return content
@@ -141,8 +164,93 @@ class UploadDocumentTests(unittest.TestCase):
         content = self.make_pdf("2027 admission requirements")
         self.assertEqual(
             extract_pages("guide.pdf", content),
-            [{"page": 1, "text": "2027 admission requirements"}],
+            [{
+                "page": 1,
+                "text": "2027 admission requirements",
+                "extraction_method": "pymupdf_native",
+            }],
         )
+
+    def test_scanned_pdf_is_ocrd_and_the_text_is_uploaded_to_qdrant(self):
+        client = self.make_qdrant()
+        ocr_text = (
+            "Recognized scanned admission requirements and application details. "
+            * 4
+        )
+        ocr_textpage = object()
+        original_get_text = pymupdf.Page.get_text
+
+        def get_text(page, option="text", *args, **kwargs):
+            if kwargs.get("textpage") is ocr_textpage:
+                return ocr_text
+            return original_get_text(page, option, *args, **kwargs)
+
+        with (
+            patch.object(
+                pymupdf.Page,
+                "get_textpage_ocr",
+                return_value=ocr_textpage,
+            ) as ocr,
+            patch.object(pymupdf.Page, "get_text", new=get_text),
+        ):
+            result = upload_document_to_qdrant(
+                "scanned-guide.pdf",
+                self.make_scanned_pdf(),
+                client,
+                FakeEmbeddingModel(),
+            )
+
+        self.assertEqual(ocr.call_args.kwargs["language"], "eng+kor")
+        self.assertEqual(result["ocr_pages"], 1)
+        points, _ = client.scroll(
+            UPLOAD_COLLECTION,
+            limit=10,
+            with_payload=True,
+        )
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0].payload["page"], 1)
+        self.assertEqual(points[0].payload["extraction_method"], "pymupdf_ocr")
+        self.assertIn(ocr_text.strip(), points[0].payload["text"])
+        self.assertEqual(points[0].payload["status"], "active")
+
+    def test_scanned_pdf_reports_missing_tesseract_instead_of_skipping_ocr(self):
+        with patch.object(
+            pymupdf.Page,
+            "get_textpage_ocr",
+            side_effect=RuntimeError("Tesseract is not installed"),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "Install Tesseract OCR with the eng\\+kor language data",
+            ):
+                extract_pages("scanned-guide.pdf", self.make_scanned_pdf())
+
+    def test_sparse_vector_graphics_page_is_ocrd(self):
+        ocr_text = "Admission Timeline Application Deadline"
+        ocr_textpage = object()
+        original_get_text = pymupdf.Page.get_text
+
+        def get_text(page, option="text", *args, **kwargs):
+            if kwargs.get("textpage") is ocr_textpage:
+                return ocr_text
+            return original_get_text(page, option, *args, **kwargs)
+
+        with (
+            patch.object(
+                pymupdf.Page,
+                "get_textpage_ocr",
+                return_value=ocr_textpage,
+            ) as ocr,
+            patch.object(pymupdf.Page, "get_text", new=get_text),
+        ):
+            pages = extract_pages(
+                "vector-guide.pdf",
+                self.make_vector_graphics_pdf(),
+            )
+
+        self.assertEqual(ocr.call_count, 1)
+        self.assertEqual(pages[0]["extraction_method"], "pymupdf_ocr")
+        self.assertEqual(pages[0]["text"], ocr_text)
 
     def test_generic_markdown_upload_is_indexed_and_searchable(self):
         client = self.make_qdrant((LEGACY_COLLECTION,))
